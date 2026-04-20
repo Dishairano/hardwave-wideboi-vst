@@ -1,0 +1,314 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Build
+        run: cargo xtask bundle hardwave-wideboi --release
+
+      - name: Package
+        run: |
+          cd target/bundled
+          zip -r hardwave-wideboi-linux-x64.zip hardwave-wideboi.vst3 hardwave-wideboi.clap
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-wideboi-linux-x64
+          path: target/bundled/hardwave-wideboi-linux-x64.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo xtask bundle hardwave-wideboi --release
+
+      - name: Package
+        shell: bash
+        run: |
+          cd target/bundled
+          7z a -tzip hardwave-wideboi-windows-x64.zip hardwave-wideboi.vst3 hardwave-wideboi.clap
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-wideboi-windows-x64
+          path: target/bundled/hardwave-wideboi-windows-x64.zip
+
+  build-macos-x64:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Build
+        run: cargo xtask bundle hardwave-wideboi --release --target x86_64-apple-darwin
+
+      - name: Package
+        run: |
+          cd target/bundled
+          zip -r hardwave-wideboi-macos-x64.zip hardwave-wideboi.vst3 hardwave-wideboi.clap
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-wideboi-macos-x64
+          path: target/bundled/hardwave-wideboi-macos-x64.zip
+
+  build-macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build
+        run: cargo xtask bundle hardwave-wideboi --release --target aarch64-apple-darwin
+
+      - name: Package
+        run: |
+          cd target/bundled
+          zip -r hardwave-wideboi-macos-arm64.zip hardwave-wideboi.vst3 hardwave-wideboi.clap
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-wideboi-macos-arm64
+          path: target/bundled/hardwave-wideboi-macos-arm64.zip
+
+  release:
+    needs: [build-linux, build-windows, build-macos-x64, build-macos-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create universal macOS zip
+        run: |
+          mkdir -p universal-macos/hardwave-wideboi.vst3/Contents
+          cd artifacts/hardwave-wideboi-macos-arm64
+          unzip hardwave-wideboi-macos-arm64.zip
+          cd ../..
+          cd artifacts/hardwave-wideboi-macos-x64
+          unzip hardwave-wideboi-macos-x64.zip
+          cd ../..
+          cp -r artifacts/hardwave-wideboi-macos-arm64/hardwave-wideboi.vst3 universal-macos/
+          cp -r artifacts/hardwave-wideboi-macos-arm64/hardwave-wideboi.clap universal-macos/
+          cd universal-macos
+          zip -r hardwave-wideboi-macos-universal.zip hardwave-wideboi.vst3 hardwave-wideboi.clap
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Hardwave WideBoi ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          files: |
+            artifacts/hardwave-wideboi-linux-x64/*.zip
+            artifacts/hardwave-wideboi-windows-x64/*.zip
+            universal-macos/hardwave-wideboi-macos-universal.zip
+          body: |
+            ## Hardwave WideBoi ${{ steps.version.outputs.version }}
+
+            Stereo widener VST3/CLAP plugin — powered by Hardwave Studios.
+
+            ### Downloads
+
+            | Platform | File |
+            |----------|------|
+            | Windows x64 | `hardwave-wideboi-windows-x64.zip` |
+            | Linux x64 | `hardwave-wideboi-linux-x64.zip` |
+            | macOS Universal (Intel + Apple Silicon) | `hardwave-wideboi-macos-universal.zip` |
+
+            ### Installation
+
+            **Windows:**
+            1. Extract the zip
+            2. Copy `hardwave-wideboi.vst3` folder to `C:\Program Files\Common Files\VST3\`
+            3. Copy `hardwave-wideboi.clap` to `C:\Program Files\Common Files\CLAP\`
+
+            **macOS:**
+            1. Extract: `unzip hardwave-wideboi-macos-universal.zip`
+            2. Copy `hardwave-wideboi.vst3` to `~/Library/Audio/Plug-Ins/VST3/`
+            3. Copy `hardwave-wideboi.clap` to `~/Library/Audio/Plug-Ins/CLAP/`
+
+            **Linux:**
+            1. Extract: `unzip hardwave-wideboi-linux-x64.zip`
+            2. Copy to `~/.vst3/` and `~/.clap/`
+
+      - name: Update product database
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H 46.225.219.184 >> ~/.ssh/known_hosts 2>/dev/null
+
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@46.225.219.184"
+
+          BASE="https://github.com/Dishairano/hardwave-wideboi-vst/releases/download/${VERSION}"
+          $SSH "docker exec hardwave-database mysql -u fl_organizer_user -p'FlOrganizer2024Secure!' fl_organizer_db -e \"
+            UPDATE products SET
+              current_version = '${VERSION_NUM}',
+              download_url_windows = '${BASE}/hardwave-wideboi-windows-x64.zip',
+              download_url_mac     = '${BASE}/hardwave-wideboi-macos-universal.zip',
+              download_url_linux   = '${BASE}/hardwave-wideboi-linux-x64.zip'
+            WHERE slug = 'wideboi';
+            INSERT INTO plugin_versions (slug, version) VALUES ('wideboi', '${VERSION}')
+              ON DUPLICATE KEY UPDATE version = '${VERSION}';
+          \""
+
+          echo "Database updated: wideboi -> ${VERSION_NUM}"
+          rm -f ~/.ssh/deploy_key
+
+  discord-changelog:
+    needs: [release]
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Post Discord changelog
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          # Read bullets from the annotated tag and group by prefix.
+          RAW=$(git tag -l --format='%(contents)' "$VERSION" 2>/dev/null \
+            | grep '^\s*[-*]' \
+            | sed 's/^\s*[-*]\s*//')
+
+          FEATURES=""
+          FIXES=""
+          IMPROVEMENTS=""
+          TOTAL=0
+
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            TOTAL=$((TOTAL + 1))
+            case "$line" in
+              feat:*|feature:*|add:*|new:*)
+                FEATURES="${FEATURES}• ${line#*: }"$'\n' ;;
+              fix:*|bug:*|bugfix:*)
+                FIXES="${FIXES}• ${line#*: }"$'\n' ;;
+              improve:*|perf:*|refactor:*|ui:*|ux:*|chore:*)
+                IMPROVEMENTS="${IMPROVEMENTS}• ${line#*: }"$'\n' ;;
+              *)
+                IMPROVEMENTS="${IMPROVEMENTS}• ${line}"$'\n' ;;
+            esac
+          done <<< "$RAW"
+
+          FIELDS=$(jq -n \
+            --arg features "$(echo -n "$FEATURES" | sed -e 's/[[:space:]]*$//')" \
+            --arg fixes "$(echo -n "$FIXES" | sed -e 's/[[:space:]]*$//')" \
+            --arg improvements "$(echo -n "$IMPROVEMENTS" | sed -e 's/[[:space:]]*$//')" \
+            '[
+              (if $features != "" then {"name": "New features", "value": $features, "inline": false} else empty end),
+              (if $fixes != "" then {"name": "Bug fixes", "value": $fixes, "inline": false} else empty end),
+              (if $improvements != "" then {"name": "Improvements", "value": $improvements, "inline": false} else empty end)
+            ]')
+
+          if [ "$(echo "$FIELDS" | jq 'length')" = "0" ]; then
+            FIELDS='[{"name": "Improvements", "value": "• Internal maintenance and stability updates", "inline": false}]'
+            TOTAL=1
+          fi
+
+          NOUN="changes"
+          [ "$TOTAL" = "1" ] && NOUN="change"
+
+          PAYLOAD=$(jq -n \
+            --arg title "Hardwave WideBoi ${VERSION}" \
+            --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${VERSION}" \
+            --argjson fields "$FIELDS" \
+            --arg footer "Release ${VERSION} · ${TOTAL} ${NOUN}" \
+            --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              "embeds": [{
+                "title": $title,
+                "url": $url,
+                "color": 15228416,
+                "fields": $fields,
+                "footer": {
+                  "text": $footer
+                },
+                "timestamp": $timestamp
+              }]
+            }')
+
+          curl -s -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK_URL"
+
+          echo "Discord changelog posted for ${VERSION}"
