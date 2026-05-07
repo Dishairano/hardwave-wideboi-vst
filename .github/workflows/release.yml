@@ -165,8 +165,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           name: Hardwave WideBoi ${{ steps.version.outputs.version }}
           draft: false
-          prerelease: false
-          make_latest: true
+          prerelease: true
           generate_release_notes: true
           files: |
             artifacts/hardwave-wideboi-linux-x64/*.zip
@@ -202,6 +201,7 @@ jobs:
             2. Copy to `~/.vst3/` and `~/.clap/`
 
       - name: Update product database
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
