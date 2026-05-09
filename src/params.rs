@@ -1,6 +1,10 @@
 //! DAW-exposed parameters for Hardwave WideBoi — a stereo widener.
+//!
+//! All numeric params are smoothed (logarithmic for gain/freq, linear for
+//! width) so user automation doesn't introduce zipper noise on the audio.
 
 use nih_plug::prelude::*;
+use std::sync::Arc;
 
 #[derive(Params)]
 pub struct HardwaveWideBoiParams {
@@ -35,6 +39,7 @@ impl Default for HardwaveWideBoiParams {
                 FloatRange::Linear { min: 0.0, max: 4.0 },
             )
             .with_unit(" x")
+            .with_smoother(SmoothingStyle::Linear(20.0))
             .with_value_to_string(Arc::new(|v| format!("{:.0}%", v * 100.0)))
             .with_string_to_value(Arc::new(|s| {
                 s.trim_end_matches('%')
@@ -56,23 +61,19 @@ impl Default for HardwaveWideBoiParams {
                 },
             )
             .with_unit(" Hz")
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
             .with_value_to_string(Arc::new(|v| format!("{:.0}", v))),
 
             output_gain_db: FloatParam::new(
                 "Output",
                 0.0,
-                FloatRange::Linear {
-                    min: -24.0,
-                    max: 24.0,
-                },
+                FloatRange::Linear { min: -24.0, max: 24.0 },
             )
             .with_unit(" dB")
+            .with_smoother(SmoothingStyle::Linear(15.0))
             .with_value_to_string(Arc::new(|v| format!("{:+.1}", v))),
 
             bypass: BoolParam::new("Bypass", false),
         }
     }
 }
-
-// We need Arc in scope for the closure boxes above.
-use std::sync::Arc;

@@ -1,25 +1,34 @@
 //! Hardwave WideBoi — stereo widener VST3/CLAP plugin.
 //!
 //! Signal chain:
-//!   Input → (optional mono-bass crossover) → Mid/Side width scaling → Output
+//!   Input → (optional Linkwitz-Riley 4 mono-bass crossover)
+//!         → Mid/Side width scaling on the high band
+//!         → Sum back with mono-summed low band
+//!         → Output gain
 //!
 //! Sibling of WettBoi; shares branding and webview architecture but performs
 //! stereo widening rather than wet-signal generation.
 
 use nih_plug::prelude::*;
+use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 mod dsp;
 mod params;
 
 use dsp::StereoWidener;
 use params::HardwaveWideBoiParams;
-use std::num::NonZeroU32;
 
 struct HardwaveWideBoi {
     params: Arc<HardwaveWideBoiParams>,
     widener: StereoWidener,
     sample_rate: f32,
+
+    /// Latest stereo correlation, packed as f32 bits in an `AtomicU32`.
+    /// Written from the audio thread once per block; read by the editor
+    /// (or any other host integration) without locking.
+    correlation: Arc<AtomicU32>,
 }
 
 impl Default for HardwaveWideBoi {
@@ -29,6 +38,7 @@ impl Default for HardwaveWideBoi {
             params: Arc::new(HardwaveWideBoiParams::default()),
             widener: StereoWidener::new(sr),
             sample_rate: sr,
+            correlation: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         }
     }
 }
@@ -70,6 +80,7 @@ impl Plugin for HardwaveWideBoi {
 
     fn reset(&mut self) {
         self.widener.reset();
+        self.correlation.store(1.0_f32.to_bits(), Ordering::Relaxed);
     }
 
     fn process(
@@ -78,24 +89,26 @@ impl Plugin for HardwaveWideBoi {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let p = &self.params;
-
-        if p.bypass.value() {
+        if self.params.bypass.value() {
             return ProcessStatus::Normal;
         }
 
-        let width = p.width.value();
-        let mono_on = p.mono_bass_on.value();
-        let mono_hz = p.mono_bass_hz.value();
-        let out_gain = util::db_to_gain(p.output_gain_db.value());
-
-        self.widener.set_width(width);
-        self.widener.set_mono_bass(mono_hz, mono_on);
+        let mono_on = self.params.mono_bass_on.value();
 
         for mut frame in buffer.iter_samples() {
             if frame.len() < 2 {
                 continue;
             }
+
+            // Pull the next smoothed sample for each automatable param so
+            // user automation doesn't introduce zipper noise.
+            let width = self.params.width.smoothed.next();
+            let mono_hz = self.params.mono_bass_hz.smoothed.next();
+            let out_gain = util::db_to_gain(self.params.output_gain_db.smoothed.next());
+
+            self.widener.set_width(width);
+            self.widener.set_mono_bass(mono_hz, mono_on);
+
             let l_ptr = frame.get_mut(0).unwrap() as *mut f32;
             let r_ptr = frame.get_mut(1).unwrap() as *mut f32;
             unsafe {
@@ -105,12 +118,20 @@ impl Plugin for HardwaveWideBoi {
             }
         }
 
+        // Update the correlation read-out once per block — cheap and gives
+        // the editor (when it lands in v0.3) a smooth, lock-free meter.
+        self.widener.finalize_correlation();
+        self.correlation.store(
+            self.widener.correlation().to_bits(),
+            Ordering::Relaxed,
+        );
+
         ProcessStatus::Normal
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // Editor/webview UI comes in a later release; DAW generic UI is used
-        // for now so the plugin is usable end-to-end.
+        // Webview editor lands in v0.3. The DAW generic UI is used until
+        // then so the plugin is usable end-to-end.
         None
     }
 }
