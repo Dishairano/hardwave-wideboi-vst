@@ -14,6 +14,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod crash_reporter;
 mod dsp;
 mod params;
 
@@ -73,6 +74,7 @@ impl Plugin for HardwaveWideBoi {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        crash_reporter::install("wideboi");
         self.sample_rate = buffer_config.sample_rate;
         self.widener.set_sample_rate(self.sample_rate);
         true
