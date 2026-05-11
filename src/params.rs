@@ -6,6 +6,10 @@
 use nih_plug::prelude::*;
 use std::sync::Arc;
 
+/// Short alias for use across modules (editor, protocol). The full
+/// `HardwaveWideBoiParams` name stays for the public-API shape.
+pub type WideBoiParams = HardwaveWideBoiParams;
+
 #[derive(Params)]
 pub struct HardwaveWideBoiParams {
     /// Stereo width amount. 0% = mono, 100% = unity, up to 400%.

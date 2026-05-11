@@ -9,17 +9,23 @@
 //! Sibling of WettBoi; shares branding and webview architecture but performs
 //! stereo widening rather than wet-signal generation.
 
+use crossbeam_channel::{Receiver, Sender};
 use nih_plug::prelude::*;
+use parking_lot::Mutex;
 use std::num::NonZeroU32;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
+mod auth;
 mod crash_reporter;
 mod dsp;
+mod editor;
 mod params;
+mod protocol;
 
 use dsp::StereoWidener;
 use params::HardwaveWideBoiParams;
+use protocol::WbPacket;
 
 struct HardwaveWideBoi {
     params: Arc<HardwaveWideBoiParams>,
@@ -30,16 +36,37 @@ struct HardwaveWideBoi {
     /// Written from the audio thread once per block; read by the editor
     /// (or any other host integration) without locking.
     correlation: Arc<AtomicU32>,
+
+    // Editor communication. The audio thread pushes a snapshot ~60 fps
+    // through a bounded channel; the editor JS-pump thread drains it.
+    editor_packet_tx: Sender<WbPacket>,
+    editor_packet_rx: Arc<Mutex<Receiver<WbPacket>>>,
+    update_counter: u32,
+
+    // Audio-thread metering — packed back into the packet snapshot just
+    // before it ships to the editor.
+    input_peak_l: f32,
+    input_peak_r: f32,
+    output_peak_l: f32,
+    output_peak_r: f32,
 }
 
 impl Default for HardwaveWideBoi {
     fn default() -> Self {
         let sr = 44_100.0;
+        let (pkt_tx, pkt_rx) = crossbeam_channel::bounded(4);
         Self {
             params: Arc::new(HardwaveWideBoiParams::default()),
             widener: StereoWidener::new(sr),
             sample_rate: sr,
             correlation: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            editor_packet_tx: pkt_tx,
+            editor_packet_rx: Arc::new(Mutex::new(pkt_rx)),
+            update_counter: 0,
+            input_peak_l: 0.0,
+            input_peak_r: 0.0,
+            output_peak_l: 0.0,
+            output_peak_r: 0.0,
         }
     }
 }
@@ -89,12 +116,14 @@ impl Plugin for HardwaveWideBoi {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        if self.params.bypass.value() {
-            return ProcessStatus::Normal;
-        }
+        let mut peak_in_l = 0.0_f32;
+        let mut peak_in_r = 0.0_f32;
+        let mut peak_out_l = 0.0_f32;
+        let mut peak_out_r = 0.0_f32;
 
+        let bypass = self.params.bypass.value();
         let mono_on = self.params.mono_bass_on.value();
 
         for mut frame in buffer.iter_samples() {
@@ -102,39 +131,83 @@ impl Plugin for HardwaveWideBoi {
                 continue;
             }
 
-            // Pull the next smoothed sample for each automatable param so
-            // user automation doesn't introduce zipper noise.
-            let width = self.params.width.smoothed.next();
-            let mono_hz = self.params.mono_bass_hz.smoothed.next();
-            let out_gain = util::db_to_gain(self.params.output_gain_db.smoothed.next());
-
-            self.widener.set_width(width);
-            self.widener.set_mono_bass(mono_hz, mono_on);
-
             let l_ptr = frame.get_mut(0).unwrap() as *mut f32;
             let r_ptr = frame.get_mut(1).unwrap() as *mut f32;
             unsafe {
-                self.widener.process(&mut *l_ptr, &mut *r_ptr);
-                *l_ptr *= out_gain;
-                *r_ptr *= out_gain;
+                peak_in_l = peak_in_l.max((*l_ptr).abs());
+                peak_in_r = peak_in_r.max((*r_ptr).abs());
+
+                if !bypass {
+                    // Pull the next smoothed sample for each automatable param
+                    // so user automation doesn't introduce zipper noise.
+                    let width = self.params.width.smoothed.next();
+                    let mono_hz = self.params.mono_bass_hz.smoothed.next();
+                    let out_gain = util::db_to_gain(self.params.output_gain_db.smoothed.next());
+
+                    self.widener.set_width(width);
+                    self.widener.set_mono_bass(mono_hz, mono_on);
+
+                    self.widener.process(&mut *l_ptr, &mut *r_ptr);
+                    *l_ptr *= out_gain;
+                    *r_ptr *= out_gain;
+                }
+
+                peak_out_l = peak_out_l.max((*l_ptr).abs());
+                peak_out_r = peak_out_r.max((*r_ptr).abs());
             }
         }
 
         // Update the correlation read-out once per block — cheap and gives
-        // the editor (when it lands in v0.3) a smooth, lock-free meter.
+        // the editor a smooth, lock-free meter.
         self.widener.finalize_correlation();
-        self.correlation.store(
-            self.widener.correlation().to_bits(),
-            Ordering::Relaxed,
-        );
+        let correlation = self.widener.correlation();
+        self.correlation.store(correlation.to_bits(), Ordering::Relaxed);
+
+        // Decay the held peaks slightly each block so meters fall back rather
+        // than locking at max forever.
+        const PEAK_DECAY: f32 = 0.85;
+        self.input_peak_l  = (self.input_peak_l  * PEAK_DECAY).max(peak_in_l);
+        self.input_peak_r  = (self.input_peak_r  * PEAK_DECAY).max(peak_in_r);
+        self.output_peak_l = (self.output_peak_l * PEAK_DECAY).max(peak_out_l);
+        self.output_peak_r = (self.output_peak_r * PEAK_DECAY).max(peak_out_r);
+
+        // Ship a packet to the editor at ~30 fps. We rely on the host's
+        // transport state for BPM; if it's unavailable we hold the last value.
+        self.update_counter = self.update_counter.wrapping_add(1);
+        if self.update_counter >= 2 {
+            self.update_counter = 0;
+            let bpm = context
+                .transport()
+                .tempo
+                .map(|t| t as f32)
+                .unwrap_or(150.0);
+
+            let mut packet = editor::snapshot_params(&self.params, bpm, correlation);
+            packet.input_peak_l  = self.input_peak_l;
+            packet.input_peak_r  = self.input_peak_r;
+            packet.output_peak_l = self.output_peak_l;
+            packet.output_peak_r = self.output_peak_r;
+
+            // try_send drops the packet if the editor isn't draining fast
+            // enough — preferable to blocking the audio thread.
+            let _ = self.editor_packet_tx.try_send(packet);
+        }
 
         ProcessStatus::Normal
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // Webview editor lands in v0.3. The DAW generic UI is used until
-        // then so the plugin is usable end-to-end.
-        None
+        eprintln!("[HardwaveWideBoi] editor() called — creating WideBoiEditor");
+        let token = auth::load_token();
+        eprintln!(
+            "[HardwaveWideBoi] auth token: {}",
+            if token.is_some() { "present" } else { "none" }
+        );
+        Some(Box::new(editor::WideBoiEditor::new(
+            Arc::clone(&self.params),
+            Arc::clone(&self.editor_packet_rx),
+            token,
+        )))
     }
 }
 
