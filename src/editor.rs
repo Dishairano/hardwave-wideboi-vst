@@ -82,6 +82,11 @@ fn build_param_map(params: &WideBoiParams) -> HashMap<String, nih_plug::prelude:
     let mut map = HashMap::new();
 
     map.insert("width".into(),          params.width.as_ptr());
+    map.insert("width_low".into(),      params.width_low.as_ptr());
+    map.insert("width_mid".into(),      params.width_mid.as_ptr());
+    map.insert("width_high".into(),     params.width_high.as_ptr());
+    map.insert("xover_lo_hz".into(),    params.xover_lo_hz.as_ptr());
+    map.insert("xover_hi_hz".into(),    params.xover_hi_hz.as_ptr());
     map.insert("mono_bass_on".into(),   params.mono_bass_on.as_ptr());
     map.insert("mono_bass_hz".into(),   params.mono_bass_hz.as_ptr());
     map.insert("output_gain_db".into(), params.output_gain_db.as_ptr());
@@ -102,11 +107,22 @@ pub fn snapshot_params(params: &WideBoiParams, bpm: f32, correlation: f32) -> Wb
         mono_bass_hz:    params.mono_bass_hz.value(),
         output_gain_db:  params.output_gain_db.value(),
         bypass:          params.bypass.value(),
+        width_low:       params.width_low.value(),
+        width_mid:       params.width_mid.value(),
+        width_high:      params.width_high.value(),
+        xover_lo_hz:     params.xover_lo_hz.value(),
+        xover_hi_hz:     params.xover_hi_hz.value(),
         input_peak_l:    0.0,
         input_peak_r:    0.0,
         output_peak_l:   0.0,
         output_peak_r:   0.0,
         correlation,
+        // Per-band correlation + goniometer are overlaid by the audio thread
+        // after this snapshot (they're live-metered, not param-derived).
+        correlation_low:  1.0,
+        correlation_mid:  1.0,
+        correlation_high: 1.0,
+        gonio:            Vec::new(),
     }
 }
 

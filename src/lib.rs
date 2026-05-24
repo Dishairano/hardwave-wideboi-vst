@@ -23,13 +23,13 @@ mod editor;
 mod params;
 mod protocol;
 
-use dsp::StereoWidener;
+use dsp::MultibandWidener;
 use params::HardwaveWideBoiParams;
 use protocol::WbPacket;
 
 struct HardwaveWideBoi {
     params: Arc<HardwaveWideBoiParams>,
-    widener: StereoWidener,
+    widener: MultibandWidener,
     sample_rate: f32,
 
     /// Latest stereo correlation, packed as f32 bits in an `AtomicU32`.
@@ -57,7 +57,7 @@ impl Default for HardwaveWideBoi {
         let (pkt_tx, pkt_rx) = crossbeam_channel::bounded(4);
         Self {
             params: Arc::new(HardwaveWideBoiParams::default()),
-            widener: StereoWidener::new(sr),
+            widener: MultibandWidener::new(sr),
             sample_rate: sr,
             correlation: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             editor_packet_tx: pkt_tx,
@@ -124,7 +124,14 @@ impl Plugin for HardwaveWideBoi {
         let mut peak_out_r = 0.0_f32;
 
         let bypass = self.params.bypass.value();
-        let mono_on = self.params.mono_bass_on.value();
+
+        // Crossover frequencies set ONCE per block (not per sample) — changing
+        // them recomputes biquad coefficients (expensive) and crossover moves
+        // don't need audio-rate smoothing. set_crossovers no-ops if unchanged.
+        self.widener.set_crossovers(
+            self.params.xover_lo_hz.value(),
+            self.params.xover_hi_hz.value(),
+        );
 
         for mut frame in buffer.iter_samples() {
             if frame.len() < 2 {
@@ -138,15 +145,14 @@ impl Plugin for HardwaveWideBoi {
                 peak_in_r = peak_in_r.max((*r_ptr).abs());
 
                 if !bypass {
-                    // Pull the next smoothed sample for each automatable param
-                    // so user automation doesn't introduce zipper noise.
-                    let width = self.params.width.smoothed.next();
-                    let mono_hz = self.params.mono_bass_hz.smoothed.next();
+                    // Per-band widths pulled smoothed per-sample (cheap: three
+                    // float stores) so width automation stays zipper-free.
+                    let wl = self.params.width_low.smoothed.next();
+                    let wm = self.params.width_mid.smoothed.next();
+                    let wh = self.params.width_high.smoothed.next();
                     let out_gain = util::db_to_gain(self.params.output_gain_db.smoothed.next());
 
-                    self.widener.set_width(width);
-                    self.widener.set_mono_bass(mono_hz, mono_on);
-
+                    self.widener.set_widths(wl, wm, wh);
                     self.widener.process(&mut *l_ptr, &mut *r_ptr);
                     *l_ptr *= out_gain;
                     *r_ptr *= out_gain;
@@ -157,10 +163,13 @@ impl Plugin for HardwaveWideBoi {
             }
         }
 
-        // Update the correlation read-out once per block — cheap and gives
-        // the editor a smooth, lock-free meter.
-        self.widener.finalize_correlation();
-        let correlation = self.widener.correlation();
+        // Finalize per-band correlations once per block — cheap, lock-free.
+        self.widener.finalize();
+        let corr_low = self.widener.correlation_low();
+        let corr_mid = self.widener.correlation_mid();
+        let corr_high = self.widener.correlation_high();
+        // Legacy overall meter: mean of the three bands (a glance, not exact).
+        let correlation = (corr_low + corr_mid + corr_high) / 3.0;
         self.correlation.store(correlation.to_bits(), Ordering::Relaxed);
 
         // Decay the held peaks slightly each block so meters fall back rather
@@ -187,6 +196,18 @@ impl Plugin for HardwaveWideBoi {
             packet.input_peak_r  = self.input_peak_r;
             packet.output_peak_l = self.output_peak_l;
             packet.output_peak_r = self.output_peak_r;
+            packet.correlation_low  = corr_low;
+            packet.correlation_mid  = corr_mid;
+            packet.correlation_high = corr_high;
+            // Flatten the goniometer scatter into [l0,r0,l1,r1,...].
+            let mut pts = [(0.0f32, 0.0f32); dsp::multiband_widener::GONIO_POINTS];
+            self.widener.copy_goniometer(&mut pts);
+            let mut gonio = Vec::with_capacity(pts.len() * 2);
+            for (gl, gr) in pts.iter() {
+                gonio.push(*gl);
+                gonio.push(*gr);
+            }
+            packet.gonio = gonio;
 
             // try_send drops the packet if the editor isn't draining fast
             // enough — preferable to blocking the audio thread.
