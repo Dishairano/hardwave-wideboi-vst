@@ -232,7 +232,11 @@ jobs:
           echo "Database updated: wideboi -> ${VERSION_NUM}"
           rm -f ~/.ssh/deploy_key
       - name: Post Discord changelog
-        if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
+        # Only announce REAL releases: a real tag push (not workflow_dispatch
+        # test builds) AND a non-prerelease version (no '-' suffix). An
+        # `-rc`/`-beta` tag builds downloadable binaries for testing without
+        # spamming the changelog channel; the final clean tag announces.
+        if: ${{ env.DISCORD_WEBHOOK_URL != '' && github.event_name == 'push' && !contains(steps.version.outputs.version, '-') }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           VERSION: ${{ steps.version.outputs.version }}
