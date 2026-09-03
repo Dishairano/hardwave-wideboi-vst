@@ -120,7 +120,8 @@ jobs:
 
   release:
     needs: [build-linux, build-windows, build-macos-x64, build-macos-arm64]
-    runs-on: ubuntu-latest
+    # macOS, not ubuntu: this job now runs lipo and codesign.
+    runs-on: macos-latest
     permissions:
       contents: write
 
@@ -149,17 +150,39 @@ jobs:
 
       - name: Create universal macOS zip
         run: |
-          mkdir -p universal-macos/hardwave-wideboi.vst3/Contents
-          cd artifacts/hardwave-wideboi-macos-arm64
-          unzip hardwave-wideboi-macos-arm64.zip
-          cd ../..
-          cd artifacts/hardwave-wideboi-macos-x64
-          unzip hardwave-wideboi-macos-x64.zip
-          cd ../..
-          cp -r artifacts/hardwave-wideboi-macos-arm64/hardwave-wideboi.vst3 universal-macos/
-          cp -r artifacts/hardwave-wideboi-macos-arm64/hardwave-wideboi.clap universal-macos/
+          set -euo pipefail
+          # This step used to copy the arm64 build and name it "universal", so every
+          # Intel Mac silently failed to load the plug-in — hosts report that only as
+          # "failed to scan". lipo actually merges the two slices.
+          cd artifacts/hardwave-wideboi-macos-arm64 && unzip -o -q hardwave-wideboi-macos-arm64.zip && cd ../..
+          cd artifacts/hardwave-wideboi-macos-x64   && unzip -o -q hardwave-wideboi-macos-x64.zip   && cd ../..
+
+          rm -rf universal-macos && mkdir -p universal-macos
+          cp -R artifacts/hardwave-wideboi-macos-x64/hardwave-wideboi.vst3 universal-macos/
+          cp -R artifacts/hardwave-wideboi-macos-x64/hardwave-wideboi.clap universal-macos/
+
+          for K in vst3 clap; do
+            lipo -create \
+              artifacts/hardwave-wideboi-macos-x64/hardwave-wideboi.$K/Contents/MacOS/hardwave-wideboi \
+              artifacts/hardwave-wideboi-macos-arm64/hardwave-wideboi.$K/Contents/MacOS/hardwave-wideboi \
+              -output universal-macos/hardwave-wideboi.$K/Contents/MacOS/hardwave-wideboi
+            # lipo rewrites the binary and invalidates any signature; macOS will not
+            # load unsigned code into a host.
+            codesign --force --deep --sign - universal-macos/hardwave-wideboi.$K
+          done
+
+          # Fail loudly rather than shipping a thin binary called universal again.
+          for K in vst3 clap; do
+            A=$(lipo -archs universal-macos/hardwave-wideboi.$K/Contents/MacOS/hardwave-wideboi)
+            echo "hardwave-wideboi.$K -> $A"
+            case "$A" in
+              *x86_64*arm64*|*arm64*x86_64*) ;;
+              *) echo "::error::hardwave-wideboi.$K is not universal ($A)"; exit 1 ;;
+            esac
+          done
+
           cd universal-macos
-          zip -r hardwave-wideboi-macos-universal.zip hardwave-wideboi.vst3 hardwave-wideboi.clap
+          zip -r -q hardwave-wideboi-macos-universal.zip hardwave-wideboi.vst3 hardwave-wideboi.clap
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
