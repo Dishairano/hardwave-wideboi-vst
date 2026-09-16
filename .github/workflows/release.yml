@@ -289,10 +289,20 @@ jobs:
               ;;
           esac
           git fetch --tags --force >/dev/null 2>&1 || true
+          # The house format: sections (New features, Bug fixes, Improvements) and bullets
+          # written with -, * or the bullet character. Sections come through as bold lines.
           BULLETS=$(git tag -l --format='%(contents)' "$VERSION" 2>/dev/null \
-            | grep '^[[:space:]]*[-*]' \
-            | sed -e 's/^[[:space:]]*[-*][[:space:]]*//' \
-                  -e 's/[[:space:]]*$//' \
+            | awk '
+                /^[[:space:]]*[-*\xe2\x80\xa2][[:space:]]+/ {
+                  sub(/^[[:space:]]*[-*\xe2\x80\xa2][[:space:]]+/, "");
+                  sub(/[[:space:]]*$/, "");
+                  print; next
+                }
+                /^[[:space:]]*(New features|Bug fixes|Improvements)[[:space:]]*$/ {
+                  sub(/^[[:space:]]*/, ""); sub(/[[:space:]]*$/, "");
+                  print "**" $0 "**"; next
+                }
+              ' \
             || true)
           if [ -z "$BULLETS" ]; then
             BULLETS="Stability and maintenance updates"
