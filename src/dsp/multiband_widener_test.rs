@@ -85,8 +85,7 @@ mod tests {
             (v, v)
         }).collect();
         let out = run(&mut w, &mono);
-        for i in 1024..out.len() {
-            let (l, r) = out[i];
+        for (i, &(l, r)) in out.iter().enumerate().skip(1024) {
             assert!((l - r).abs() < 1e-4, "mono diverged at {i}: L={l} R={r}");
         }
     }

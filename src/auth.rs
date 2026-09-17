@@ -4,7 +4,6 @@
 //! `~/.local/share/hardwave/auth_token` (Linux/macOS) or the platform
 //! equivalent via `dirs::data_dir()`.
 
-use dirs;
 use std::fs;
 use std::path::PathBuf;
 

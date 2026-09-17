@@ -218,10 +218,10 @@ impl MultibandWidener {
     /// up to its length.
     pub fn copy_goniometer(&self, out: &mut [(f32, f32)]) {
         let n = out.len().min(GONIO_POINTS);
-        for k in 0..n {
+        for (k, slot) in out.iter_mut().enumerate().take(n) {
             // Read in chronological order starting just after the write head.
             let src = (self.gonio_idx + k) % GONIO_POINTS;
-            out[k] = self.gonio[src];
+            *slot = self.gonio[src];
         }
     }
 

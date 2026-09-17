@@ -1,3 +1,8 @@
+//! The v0.3 single-band widener, superseded by `multiband_widener` and kept as
+//! reference (see `dsp/mod.rs`). Nothing constructs it, which is the intent, so
+//! the dead-code warning is silenced here rather than in CI.
+#![allow(dead_code)]
+
 //! Stereo widener via Mid/Side processing with optional mono-bass below a
 //! cutoff. Classic approach, but split through a phase-coherent
 //! Linkwitz-Riley 4th-order crossover so the low/high recombine cleanly.
